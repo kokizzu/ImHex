@@ -20,6 +20,7 @@
 #include "views/view_settings.hpp"
 #include "views/view_data_processor.hpp"
 #include "views/view_yara.hpp"
+#include "views/view_constants.hpp"
 
 #include "helpers/plugin_manager.hpp"
 
@@ -32,7 +33,7 @@ namespace hex::init {
 
         auto releases = net.getJson("https://api.github.com/repos/WerWolv/ImHex/releases/latest");
         if (releases.code != 200)
-        return false;
+            return false;
 
         if (!releases.response.contains("tag_name") || !releases.response["tag_name"].is_string())
             return false;
@@ -47,15 +48,31 @@ namespace hex::init {
     }
 
     bool createDirectories() {
+        bool result = true;
 
-        std::filesystem::create_directories(hex::getPath(ImHexPath::Patterns)[0]);
-        std::filesystem::create_directories(hex::getPath(ImHexPath::PatternsInclude)[0]);
-        std::filesystem::create_directories(hex::getPath(ImHexPath::Magic)[0]);
-        std::filesystem::create_directories(hex::getPath(ImHexPath::Plugins)[0]);
-        std::filesystem::create_directories(hex::getPath(ImHexPath::Resources)[0]);
-        std::filesystem::create_directories(hex::getPath(ImHexPath::Config)[0]);
+        std::array paths = {
+                ImHexPath::Patterns,
+                ImHexPath::PatternsInclude,
+                ImHexPath::Magic,
+                ImHexPath::Plugins,
+                ImHexPath::Resources,
+                ImHexPath::Config
+        };
 
-        return true;
+        for (auto path : paths) {
+            for (auto &folder : hex::getPath(path)) {
+                try {
+                    std::filesystem::create_directories(folder);
+                } catch (...) {
+                    result = false;
+                }
+            }
+        }
+
+        if (!result)
+            getInitArguments().push_back({ "folder-creation-error", { } });
+
+        return result;
     }
 
     bool loadDefaultViews() {
@@ -76,6 +93,7 @@ namespace hex::init {
         ContentRegistry::Views::add<ViewSettings>();
         ContentRegistry::Views::add<ViewDataProcessor>();
         ContentRegistry::Views::add<ViewYara>();
+        ContentRegistry::Views::add<ViewConstants>();
 
         return true;
     }
@@ -112,14 +130,21 @@ namespace hex::init {
     }
 
     bool loadSettings() {
-        ContentRegistry::Settings::load();
+        try {
+            ContentRegistry::Settings::load();
+        } catch (...) {
+            return false;
+        }
 
         return true;
     }
 
     bool storeSettings() {
-        ContentRegistry::Settings::store();
-
+        try {
+            ContentRegistry::Settings::store();
+        } catch (...) {
+            return false;
+        }
         return true;
     }
 
@@ -129,15 +154,15 @@ namespace hex::init {
                 { "Creating directories...",    createDirectories   },
                 { "Loading default views...",   loadDefaultViews    },
                 { "Loading plugins...",         loadPlugins         },
-                { "Loading settings...",        loadSettings        }
+                { "Loading settings...",        loadSettings        },
         };
     }
 
     std::vector<Task> getExitTasks() {
         return {
-                { "Unloading plugins...",       unloadPlugins       },
+                { "Cleaning up views...",       deleteViews         },
                 { "Saving settings...",         storeSettings       },
-                { "Cleaning up views...",       deleteViews         }
+                { "Unloading plugins...",       unloadPlugins       },
         };
     }
 

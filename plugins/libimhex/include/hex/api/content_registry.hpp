@@ -87,10 +87,10 @@ namespace hex {
 
             struct Function {
                 u32 parameterCount;
-                std::function<hex::lang::ASTNode*(hex::lang::Evaluator&, std::vector<hex::lang::ASTNode*>)> func;
+                std::function<hex::lang::ASTNode*(hex::lang::Evaluator&, std::vector<hex::lang::ASTNode*>&)> func;
             };
 
-            static void add(std::string_view name, u32 parameterCount, const std::function<hex::lang::ASTNode*(hex::lang::Evaluator&, std::vector<hex::lang::ASTNode*>)> &func);
+            static void add(std::string_view name, u32 parameterCount, const std::function<hex::lang::ASTNode*(hex::lang::Evaluator&, std::vector<hex::lang::ASTNode*>&)> &func);
             static std::map<std::string, ContentRegistry::PatternLanguageFunctions::Function>& getEntries();
         };
 
@@ -160,7 +160,13 @@ namespace hex {
 
             template<hex::derived_from<dp::Node> T, typename ... Args>
             static void add(std::string_view unlocalizedCategory, std::string_view unlocalizedName, Args&& ... args) {
-                add(Entry{ unlocalizedCategory.data(), unlocalizedName.data(), [args...]{ return new T(std::forward<Args>(args)...); } });
+                add(Entry{ unlocalizedCategory.data(), unlocalizedName.data(),
+                   [args..., name = std::string(unlocalizedName)]{
+                        auto node = new T(std::forward<Args>(args)...);
+                        node->setUnlocalizedName(name);
+                        return node;
+                   }
+                });
             }
 
             static void addSeparator();

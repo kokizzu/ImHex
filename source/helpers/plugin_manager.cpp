@@ -15,8 +15,10 @@ namespace hex {
     Plugin::Plugin(std::string_view path) {
         this->m_handle = dlopen(path.data(), RTLD_LAZY);
 
-        if (this->m_handle == nullptr)
+        if (this->m_handle == nullptr) {
+            hex::log::error("dlopen failed: {}", dlerror());
             return;
+        }
 
         auto pluginName = fs::path(path).stem().string();
 
@@ -54,7 +56,7 @@ namespace hex {
         if (this->m_getPluginNameFunction != nullptr)
             return this->m_getPluginNameFunction();
         else
-            return hex::format("Unknown Plugin @ 0x{0:016X}", this->m_handle);
+            return hex::format("Unknown Plugin @ 0x{0:016X}", reinterpret_cast<intptr_t>(this->m_handle));
     }
 
     std::string Plugin::getPluginAuthor() const {

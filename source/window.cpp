@@ -57,7 +57,6 @@ namespace hex {
     Window::Window() {
         SharedData::currentProvider = nullptr;
 
-        #if !defined(RELEASE)
         {
             for (const auto &[argument, value] : init::getInitArguments()) {
                 if (argument == "update-available") {
@@ -67,7 +66,6 @@ namespace hex {
                 }
             }
         }
-        #endif
 
         this->initGLFW();
         this->initImGui();
@@ -102,8 +100,12 @@ namespace hex {
             {
                 auto language = ContentRegistry::Settings::getSetting("hex.builtin.setting.interface", "hex.builtin.setting.interface.language");
 
-                if (language.is_string())
+                if (language.is_string()) {
                     LangEntry::loadLanguage(static_cast<std::string>(language));
+                } else {
+                    // If no language is specified, fall back to English.
+                    LangEntry::loadLanguage("en-US");
+                }
             }
 
             {
@@ -181,45 +183,15 @@ namespace hex {
     }
 
     void Window::loop() {
-        bool pressedKeys[512] = { false };
-
         this->m_lastFrameTime = glfwGetTime();
         while (!glfwWindowShouldClose(this->m_window)) {
-            std::copy_n(ImGui::GetIO().KeysDown, 512, this->m_prevKeysDown);
+            if (!glfwGetWindowAttrib(this->m_window, GLFW_VISIBLE) || glfwGetWindowAttrib(this->m_window, GLFW_ICONIFIED))
+                glfwWaitEvents();
+
+            glfwPollEvents();
 
             this->frameBegin();
-
-            for (u16 i = 0; i < 512; i++)
-                pressedKeys[i] = ImGui::GetIO().KeysDown[i] && !this->m_prevKeysDown[i];
-
-            for (const auto &call : View::getDeferedCalls())
-                call();
-            View::getDeferedCalls().clear();
-
-            for (auto &view : ContentRegistry::Views::getEntries()) {
-                view->drawAlwaysVisible();
-
-                if (!view->shouldProcess())
-                    continue;
-
-                auto minSize = view->getMinSize();
-                minSize.x *= this->m_globalScale;
-                minSize.y *= this->m_globalScale;
-
-                ImGui::SetNextWindowSizeConstraints(minSize, view->getMaxSize());
-                view->drawContent();
-                view->handleShortcut(pressedKeys, ImGui::GetIO().KeyCtrl, ImGui::GetIO().KeyShift, ImGui::GetIO().KeyAlt);
-            }
-
-            View::drawCommonInterfaces();
-
-            #ifdef DEBUG
-                if (this->m_demoWindowOpen) {
-                    ImGui::ShowDemoWindow(&this->m_demoWindowOpen);
-                    ImPlot::ShowDemoWindow(&this->m_demoWindowOpen);
-                }
-            #endif
-
+            this->frame();
             this->frameEnd();
         }
     }
@@ -280,11 +252,6 @@ namespace hex {
 
     void Window::frameBegin() {
 
-        if (!glfwGetWindowAttrib(this->m_window, GLFW_VISIBLE) || glfwGetWindowAttrib(this->m_window, GLFW_ICONIFIED))
-            glfwWaitEvents();
-
-        glfwPollEvents();
-
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -341,26 +308,18 @@ namespace hex {
                 }
 
                 if (ImGui::BeginMenu("hex.menu.view"_lang)) {
-                    ImGui::Separator();
-                    ImGui::MenuItem("hex.menu.view.fps"_lang, "", &this->m_fpsVisible);
-                    #ifdef DEBUG
+                    #if defined(DEBUG)
+                        ImGui::Separator();
                         ImGui::MenuItem("hex.menu.view.demo"_lang, "", &this->m_demoWindowOpen);
                     #endif
                     ImGui::EndMenu();
                 }
 
-                if (this->m_fpsVisible) {
-                    std::string fps = hex::format("{:.1f} FPS ", ImGui::GetIO().Framerate);
+                #if defined(DEBUG)
                     ImGui::SameLine();
-                    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - fps.length() * ImGui::GetFontSize());
-                    ImGui::TextUnformatted(fps.c_str());
-                } else {
-                    #if defined(DEBUG)
-                        ImGui::SameLine();
-                        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 2 * ImGui::GetFontSize());
-                        ImGui::TextUnformatted(ICON_FA_BUG);
-                    #endif
-                }
+                    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 2 * ImGui::GetFontSize());
+                    ImGui::TextUnformatted(ICON_FA_BUG);
+                #endif
 
                 ImGui::EndMenuBar();
             }
@@ -395,6 +354,42 @@ namespace hex {
         }
     }
 
+    void Window::frame() {
+        bool pressedKeys[512] = { false };
+
+        std::copy_n(ImGui::GetIO().KeysDown, 512, this->m_prevKeysDown);
+        for (u16 i = 0; i < 512; i++)
+            pressedKeys[i] = ImGui::GetIO().KeysDown[i] && !this->m_prevKeysDown[i];
+
+        for (const auto &call : View::getDeferedCalls())
+            call();
+        View::getDeferedCalls().clear();
+
+        for (auto &view : ContentRegistry::Views::getEntries()) {
+            view->drawAlwaysVisible();
+
+            if (!view->shouldProcess())
+                continue;
+
+            auto minSize = view->getMinSize();
+            minSize.x *= this->m_globalScale;
+            minSize.y *= this->m_globalScale;
+
+            ImGui::SetNextWindowSizeConstraints(minSize, view->getMaxSize());
+            view->drawContent();
+            view->handleShortcut(pressedKeys, ImGui::GetIO().KeyCtrl, ImGui::GetIO().KeyShift, ImGui::GetIO().KeyAlt);
+        }
+
+        View::drawCommonInterfaces();
+
+#ifdef DEBUG
+        if (this->m_demoWindowOpen) {
+            ImGui::ShowDemoWindow(&this->m_demoWindowOpen);
+            ImPlot::ShowDemoWindow(&this->m_demoWindowOpen);
+        }
+#endif
+    }
+
     void Window::frameEnd() {
         ImGui::Render();
 
@@ -412,8 +407,7 @@ namespace hex {
 
         glfwSwapBuffers(this->m_window);
 
-        while (glfwGetTime() < this->m_lastFrameTime + 1 / (ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow) ? this->m_targetFps : 5.0))
-            std::this_thread::sleep_for(500us);
+        std::this_thread::sleep_for(std::chrono::milliseconds(u64((this->m_lastFrameTime + 1 / (ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow) ? this->m_targetFps : 5.0) - glfwGetTime()) * 1000)));
         this->m_lastFrameTime = glfwGetTime();
     }
 
@@ -569,7 +563,7 @@ namespace hex {
 
     void Window::initGLFW() {
         glfwSetErrorCallback([](int error, const char* desc) {
-           fprintf(stderr, "Glfw Error %d: %s\n", error, desc);
+            log::error("GLFW Error [{}] : {}", error, desc);
         });
 
         if (!glfwInit())
@@ -594,6 +588,7 @@ namespace hex {
 
         this->m_window = glfwCreateWindow(1280 * this->m_globalScale, 720 * this->m_globalScale, "ImHex", nullptr, nullptr);
 
+        glfwSetWindowUserPointer(this->m_window, this);
 
         if (this->m_window == nullptr)
             throw std::runtime_error("Failed to create window!");
@@ -615,10 +610,20 @@ namespace hex {
 
          glfwSetWindowPosCallback(this->m_window, [](GLFWwindow *window, int x, int y) {
              SharedData::windowPos = ImVec2(x, y);
+
+             auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+             win->frameBegin();
+             win->frame();
+             win->frameEnd();
          });
 
         glfwSetWindowSizeCallback(this->m_window, [](GLFWwindow *window, int width, int height) {
             SharedData::windowSize = ImVec2(width, height);
+
+            auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+            win->frameBegin();
+            win->frame();
+            win->frameEnd();
         });
 
         glfwSetKeyCallback(this->m_window, [](GLFWwindow *window, int key, int scancode, int action, int mods) {

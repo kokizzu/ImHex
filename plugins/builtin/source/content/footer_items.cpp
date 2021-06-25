@@ -1,31 +1,18 @@
 #include <hex/plugin.hpp>
 
-#if defined(OS_WINDOWS)
-    #include <windows.h>
-    #include <psapi.h>
-#endif
-
 namespace hex::plugin::builtin {
 
     void addFooterItems() {
 
-        #if defined(OS_WINDOWS)
-            ContentRegistry::Interface::addFooterItem([] {
-                static MEMORYSTATUSEX memInfo;
-                static PROCESS_MEMORY_COUNTERS_EX pmc;
+        ContentRegistry::Interface::addFooterItem([] {
+            static float framerate = 0;
+            if (ImGui::HasSecondPassed()) {
+                framerate = ImGui::GetIO().Framerate;
+            }
 
-                if (ImGui::GetFrameCount() % 60 == 0) {
-                    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
-                    GlobalMemoryStatusEx(&memInfo);
-                    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc));
-                }
+            ImGui::TextUnformatted(hex::format("FPS {0:.2f}", framerate).c_str());
+        });
 
-                auto totalMem = memInfo.ullTotalPhys;
-                auto usedMem = pmc.PrivateUsage;
-
-                ImGui::TextUnformatted(hex::format("{0} / {1}", hex::toByteString(usedMem), hex::toByteString(totalMem)).c_str());
-            });
-        #endif
     }
 
 }

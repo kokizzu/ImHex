@@ -5,7 +5,7 @@
 
 #define MATCHES(x) (begin() && x)
 
-#define TO_NUMERIC_EXPRESSION(node) new ASTNodeNumericExpression((node), new ASTNodeIntegerLiteral({ Token::ValueType::Any, s32(0) }), Token::Operator::Plus)
+#define TO_NUMERIC_EXPRESSION(node) new ASTNodeNumericExpression((node), new ASTNodeIntegerLiteral(s32(0)), Token::Operator::Plus)
 
 // Definition syntax:
 // [A]          : Either A or no token
@@ -84,7 +84,7 @@ namespace hex::lang {
             else
                 throwParseError("expected member name or 'parent' keyword", -1);
         } else
-            return new ASTNodeRValue(path);
+            return TO_NUMERIC_EXPRESSION(new ASTNodeRValue(path));
     }
 
     // <Integer|((parseMathematicalExpression))>
@@ -108,7 +108,7 @@ namespace hex::lang {
             ASTNodeRValue::Path path;
             return TO_NUMERIC_EXPRESSION(this->parseRValue(path));
         } else if (MATCHES(sequence(OPERATOR_DOLLAR))) {
-            return new ASTNodeRValue({ "$" });
+            return TO_NUMERIC_EXPRESSION(new ASTNodeRValue({ "$" }));
         } else if (MATCHES(oneOf(OPERATOR_ADDRESSOF, OPERATOR_SIZEOF) && sequence(SEPARATOR_ROUNDBRACKETOPEN))) {
             auto op = getValue<Token::Operator>(-2);
 
@@ -132,7 +132,7 @@ namespace hex::lang {
         if (MATCHES(oneOf(OPERATOR_PLUS, OPERATOR_MINUS, OPERATOR_BOOLNOT, OPERATOR_BITNOT))) {
             auto op = getValue<Token::Operator>(-1);
 
-            return new ASTNodeNumericExpression(new ASTNodeIntegerLiteral({ Token::ValueType::Any, 0 }), this->parseFactor(), op);
+            return new ASTNodeNumericExpression(new ASTNodeIntegerLiteral(0), this->parseFactor(), op);
         }
 
         return this->parseFactor();
@@ -358,6 +358,150 @@ namespace hex::lang {
             throwParseError("unfinished attribute. Expected ']]'");
     }
 
+    /* Functions */
+
+    ASTNode* Parser::parseFunctionDefintion() {
+        const auto &functionName = getValue<std::string>(-2);
+        std::vector<std::string> params;
+
+        // Parse parameter list
+        bool hasParams = MATCHES(sequence(IDENTIFIER));
+        while (hasParams) {
+            params.push_back(getValue<std::string>(-1));
+
+            if (!MATCHES(sequence(SEPARATOR_COMMA))) {
+                if (MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE)))
+                    break;
+                else
+                    throwParseError("expected closing ')' after parameter list");
+            }
+        }
+        if (!hasParams) {
+            if (!MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE)))
+                throwParseError("expected closing ')' after parameter list");
+        }
+
+        if (!MATCHES(sequence(SEPARATOR_CURLYBRACKETOPEN)))
+            throwParseError("expected opening '{' after function definition");
+
+
+        // Parse function body
+        std::vector<ASTNode*> body;
+        auto bodyCleanup = SCOPE_GUARD {
+            for (auto &node : body)
+                delete node;
+        };
+
+        while (!MATCHES(sequence(SEPARATOR_CURLYBRACKETCLOSE))) {
+            body.push_back(this->parseFunctionStatement());
+        }
+
+        bodyCleanup.release();
+        return new ASTNodeFunctionDefinition(functionName, params, body);
+    }
+
+    ASTNode* Parser::parseFunctionStatement() {
+        bool needsSemicolon = true;
+        ASTNode *statement;
+
+        if (MATCHES(sequence(IDENTIFIER, SEPARATOR_ROUNDBRACKETOPEN)))
+            statement = parseFunctionCall();
+        else if (MATCHES((optional(KEYWORD_BE), optional(KEYWORD_LE)) && variant(IDENTIFIER, VALUETYPE_ANY) && sequence(IDENTIFIER)))
+            statement = parseMemberVariable();
+        else if (MATCHES(sequence(IDENTIFIER, OPERATOR_ASSIGNMENT)))
+            statement = parseFunctionVariableAssignment();
+        else if (MATCHES(sequence(KEYWORD_RETURN)))
+            statement = parseFunctionReturnStatement();
+        else if (MATCHES(sequence(KEYWORD_IF, SEPARATOR_ROUNDBRACKETOPEN))) {
+            statement = parseFunctionConditional();
+            needsSemicolon = false;
+        } else if (MATCHES(sequence(KEYWORD_WHILE, SEPARATOR_ROUNDBRACKETOPEN))) {
+            statement = parseFunctionWhileLoop();
+            needsSemicolon = false;
+        } else
+            throwParseError("invalid sequence", 0);
+
+        if (needsSemicolon && !MATCHES(sequence(SEPARATOR_ENDOFEXPRESSION))) {
+            delete statement;
+            throwParseError("missing ';' at end of expression", -1);
+        }
+
+        return statement;
+    }
+
+    ASTNode* Parser::parseFunctionVariableAssignment() {
+        const auto &lvalue = getValue<std::string>(-2);
+
+        auto rvalue = this->parseMathematicalExpression();
+
+        return new ASTNodeAssignment(lvalue, rvalue);
+    }
+
+    ASTNode* Parser::parseFunctionReturnStatement() {
+        if (peek(SEPARATOR_ENDOFEXPRESSION))
+            return new ASTNodeReturnStatement(nullptr);
+        else
+            return new ASTNodeReturnStatement(this->parseMathematicalExpression());
+    }
+
+    ASTNode* Parser::parseFunctionConditional() {
+        auto condition = parseMathematicalExpression();
+        std::vector<ASTNode*> trueBody, falseBody;
+
+        auto cleanup = SCOPE_GUARD {
+            delete condition;
+            for (auto &statement : trueBody)
+                delete statement;
+            for (auto &statement : falseBody)
+                delete statement;
+        };
+
+        if (MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE, SEPARATOR_CURLYBRACKETOPEN))) {
+            while (!MATCHES(sequence(SEPARATOR_CURLYBRACKETCLOSE))) {
+                trueBody.push_back(parseFunctionStatement());
+            }
+        } else if (MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE))) {
+            trueBody.push_back(parseFunctionStatement());
+        } else
+            throwParseError("expected body of conditional statement");
+
+        if (MATCHES(sequence(KEYWORD_ELSE, SEPARATOR_CURLYBRACKETOPEN))) {
+            while (!MATCHES(sequence(SEPARATOR_CURLYBRACKETCLOSE))) {
+                falseBody.push_back(parseFunctionStatement());
+            }
+        } else if (MATCHES(sequence(KEYWORD_ELSE))) {
+            falseBody.push_back(parseFunctionStatement());
+        }
+
+        cleanup.release();
+
+        return new ASTNodeConditionalStatement(condition, trueBody, falseBody);
+    }
+
+    ASTNode* Parser::parseFunctionWhileLoop() {
+        auto condition = parseMathematicalExpression();
+        std::vector<ASTNode*> body;
+
+        auto cleanup = SCOPE_GUARD {
+            delete condition;
+            for (auto &statement : body)
+                delete statement;
+        };
+
+        if (MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE, SEPARATOR_CURLYBRACKETOPEN))) {
+            while (!MATCHES(sequence(SEPARATOR_CURLYBRACKETCLOSE))) {
+                body.push_back(parseFunctionStatement());
+            }
+        } else if (MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE))) {
+            body.push_back(parseFunctionStatement());
+        } else
+            throwParseError("expected body of conditional statement");
+
+        cleanup.release();
+
+        return new ASTNodeWhileStatement(condition, body);
+    }
+
     /* Control flow */
 
     // if ((parseMathematicalExpression)) { (parseMember) }
@@ -393,6 +537,22 @@ namespace hex::lang {
         cleanup.release();
 
         return new ASTNodeConditionalStatement(condition, trueBody, falseBody);
+    }
+
+    // while ((parseMathematicalExpression))
+    ASTNode* Parser::parseWhileStatement() {
+        auto condition = parseMathematicalExpression();
+
+        auto cleanup = SCOPE_GUARD {
+            delete condition;
+        };
+
+        if (!MATCHES(sequence(SEPARATOR_ROUNDBRACKETCLOSE)))
+            throwParseError("expected closing ')' after while head");
+
+        cleanup.release();
+
+        return new ASTNodeWhileStatement(condition, { });
     }
 
     /* Type declarations */
@@ -459,7 +619,10 @@ namespace hex::lang {
         auto sizeCleanup = SCOPE_GUARD { delete size; };
 
         if (!MATCHES(sequence(SEPARATOR_SQUAREBRACKETCLOSE))) {
-            size = parseMathematicalExpression();
+            if (MATCHES(sequence(KEYWORD_WHILE, SEPARATOR_ROUNDBRACKETOPEN)))
+                size = parseWhileStatement();
+            else
+                size = parseMathematicalExpression();
 
             if (!MATCHES(sequence(SEPARATOR_SQUAREBRACKETCLOSE)))
                 throwParseError("expected closing ']' at end of array declaration", -1);
@@ -587,9 +750,9 @@ namespace hex::lang {
                 ASTNode *valueExpr;
                 auto name = getValue<std::string>(-1);
                 if (enumNode->getEntries().empty())
-                    valueExpr = lastEntry = TO_NUMERIC_EXPRESSION(new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned8Bit, u8(0) }));
+                    valueExpr = lastEntry = TO_NUMERIC_EXPRESSION(new ASTNodeIntegerLiteral(u8(0)));
                 else
-                    valueExpr = new ASTNodeNumericExpression(lastEntry->clone(), new ASTNodeIntegerLiteral({ Token::ValueType::Any, s32(1) }), Token::Operator::Plus);
+                    valueExpr = new ASTNodeNumericExpression(lastEntry->clone(), new ASTNodeIntegerLiteral(s32(1)), Token::Operator::Plus);
 
                 enumNode->addEntry(name, valueExpr);
             }
@@ -662,7 +825,10 @@ namespace hex::lang {
         auto sizeCleanup = SCOPE_GUARD { delete size; };
 
         if (!MATCHES(sequence(SEPARATOR_SQUAREBRACKETCLOSE))) {
-            size = parseMathematicalExpression();
+            if (MATCHES(sequence(KEYWORD_WHILE, SEPARATOR_ROUNDBRACKETOPEN)))
+                size = parseWhileStatement();
+            else
+                size = parseMathematicalExpression();
 
             if (!MATCHES(sequence(SEPARATOR_SQUAREBRACKETCLOSE)))
                 throwParseError("expected closing ']' at end of array declaration", -1);
@@ -721,6 +887,8 @@ namespace hex::lang {
             statement = parseBitfield();
         else if (MATCHES(sequence(IDENTIFIER, SEPARATOR_ROUNDBRACKETOPEN)))
             statement = parseFunctionCall();
+        else if (MATCHES(sequence(KEYWORD_FUNCTION, IDENTIFIER, SEPARATOR_ROUNDBRACKETOPEN)))
+            statement = parseFunctionDefintion();
         else throwParseError("invalid sequence", 0);
 
         if (MATCHES(sequence(SEPARATOR_SQUAREBRACKETOPEN, SEPARATOR_SQUAREBRACKETOPEN)))

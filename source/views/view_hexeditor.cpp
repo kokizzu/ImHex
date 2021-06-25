@@ -138,13 +138,14 @@ namespace hex {
 
             if (!page.has_value())
                 return;
-            if (region.size == 0)
-                return;
 
-            provider->setCurrentPage(page.value());
-            u64 start = region.address;
-            this->m_memoryEditor.GotoAddrAndSelect(start - provider->getBaseAddress(), start + region.size - provider->getBaseAddress() - 1);
-            EventManager::post<EventRegionSelected>(region);
+            if (region.size != 0) {
+                provider->setCurrentPage(page.value());
+                u64 start = region.address;
+                this->m_memoryEditor.GotoAddrAndSelect(start - provider->getBaseAddress(), start + region.size - provider->getBaseAddress() - 1);
+            }
+
+            EventManager::post<EventRegionSelected>(Region { this->m_memoryEditor.DataPreviewAddr, (this->m_memoryEditor.DataPreviewAddrEnd - this->m_memoryEditor.DataPreviewAddr) + 1});
         });
 
         EventManager::subscribe<EventProjectFileLoad>(this, []() {
@@ -154,15 +155,16 @@ namespace hex {
         EventManager::subscribe<EventWindowClosing>(this, [](GLFWwindow *window) {
             if (ProjectFile::hasUnsavedChanges()) {
                 glfwSetWindowShouldClose(window, GLFW_FALSE);
-                View::doLater([] { ImGui::OpenPopup("hex.view.hexeditor.save_changes.title"_lang); });
+                View::doLater([] { ImGui::OpenPopup("hex.view.hexeditor.exit_application.title"_lang); });
             }
         });
 
         EventManager::subscribe<EventPatternChanged>(this, [this]() {
             this->m_highlightedBytes.clear();
 
-            for (const auto &pattern : SharedData::patternData)
+            for (const auto &pattern : SharedData::patternData) {
                 this->m_highlightedBytes.merge(pattern->getHighlightedAddresses());
+            }
         });
 
         EventManager::subscribe<RequestOpenWindow>(this, [this](std::string name) {
@@ -281,9 +283,9 @@ namespace hex {
     void ViewHexEditor::drawAlwaysVisible() {
         auto provider = SharedData::currentProvider;
 
-        if (ImGui::BeginPopupModal("hex.view.hexeditor.save_changes.title"_lang, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::BeginPopupModal("hex.view.hexeditor.exit_application.title"_lang, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::NewLine();
-            ImGui::TextUnformatted("hex.view.hexeditor.save_changes.desc"_lang);
+            ImGui::TextUnformatted("hex.view.hexeditor.exit_application.desc"_lang);
             ImGui::NewLine();
 
             confirmButtons("hex.common.yes"_lang, "hex.common.no"_lang, [] {
@@ -537,11 +539,11 @@ namespace hex {
     }
 
     bool ViewHexEditor::handleShortcut(bool keys[512], bool ctrl, bool shift, bool alt) {
-        if (ctrl && keys['S']) {
-            save();
-            return true;
-        } else if (ctrl && shift && keys['S']) {
+        if (ctrl && shift && keys['S']) {
             saveAs();
+            return true;
+        } else if (ctrl && keys['S']) {
+            save();
             return true;
         }
 
@@ -573,6 +575,9 @@ namespace hex {
                     return true;
                 } else if (ctrl && keys['V']) {
                     this->pasteBytes();
+                    return true;
+                } else if (ctrl && keys['A']) {
+                    EventManager::post<RequestSelectionChange>(Region { SharedData::currentProvider->getBaseAddress(), SharedData::currentProvider->getSize() });
                     return true;
                 }
             }

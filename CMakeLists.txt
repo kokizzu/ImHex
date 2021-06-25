@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Updating the version here will update it throughout ImHex as well
-set(IMHEX_VERSION "1.7.0")
+set(IMHEX_VERSION "1.8.1")
 project(imhex VERSION ${IMHEX_VERSION})
 
 set(CMAKE_CXX_STANDARD 20)
@@ -12,6 +12,7 @@ setDefaultBuiltTypeIfUnset()
 # List plugin names here. Project name must match folder name
 set(PLUGINS
         builtin
+        windows
         # example
         )
 
@@ -25,13 +26,29 @@ findLibraries()
 detectOS()
 detectArch()
 
+if (NOT USE_SYSTEM_LLVM)
+    add_subdirectory(external/llvm)
+else()
+    find_package(LLVM REQUIRED Demangle)
+endif()
+if (NOT USE_SYSTEM_YARA)
+    add_subdirectory(external/yara)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(YARA REQUIRED IMPORTED_TARGET yara)
+endif()
+
 # Add bundled dependencies
-add_subdirectory(external/llvm)
-add_subdirectory(external/yara)
 add_subdirectory(plugins/libimhex)
 
 # Add include directories
 include_directories(include ${MBEDTLS_INCLUDE_DIRS} ${CAPSTONE_INCLUDE_DIRS} ${MAGIC_INCLUDE_DIRS} ${Python_INCLUDE_DIRS})
+if (USE_SYSTEM_LLVM)
+    include_directories(include ${LLVM_INCLUDE_DIRS})
+endif()
+if (USE_SYSTEM_YARA)
+    include_directories(include ${YARA_INCLUDE_DIRS})
+endif()
 
 addVersionDefines()
 configurePackageCreation()
@@ -67,6 +84,7 @@ add_executable(imhex ${application_type}
         source/views/view_settings.cpp
         source/views/view_data_processor.cpp
         source/views/view_yara.cpp
+        source/views/view_constants.cpp
 
         ${imhex_icon}
         )

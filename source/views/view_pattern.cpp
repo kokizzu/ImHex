@@ -15,7 +15,7 @@ namespace hex {
         static TextEditor::LanguageDefinition langDef;
         if (!initialized) {
             static const char* const keywords[] = {
-                "using", "struct", "union", "enum", "bitfield", "be", "le", "if", "else", "false", "true", "parent", "addressof", "sizeof"
+                "using", "struct", "union", "enum", "bitfield", "be", "le", "if", "else", "false", "true", "parent", "addressof", "sizeof", "$", "while", "fn", "return"
             };
             for (auto& k : keywords)
                 langDef.mKeywords.insert(k);
@@ -23,7 +23,7 @@ namespace hex {
             static std::pair<const char* const, size_t> builtInTypes[] = {
                     { "u8", 1 }, { "u16", 2 }, { "u32", 4 }, { "u64", 8 }, { "u128", 16 },
                     { "s8", 1 }, { "s16", 2 }, { "s32", 4 }, { "s64", 8 }, { "s128", 16 },
-                    { "float", 4 }, { "double", 8 }, { "char", 1 }, { "bool", 1 }, { "padding", 1 }
+                    { "float", 4 }, { "double", 8 }, { "char", 1 }, { "char16", 2 }, { "bool", 1 }, { "padding", 1 }
             };
 
             for (const auto &[name, size] : builtInTypes) {
@@ -143,6 +143,7 @@ namespace hex {
             });
             preprocessor.addDefaultPragmaHandlers();
 
+            this->m_possiblePatternFiles.clear();
 
             std::error_code errorCode;
             for (const auto &dir : hex::getPath(ImHexPath::Patterns)) {
@@ -294,13 +295,20 @@ namespace hex {
         if (ImGui::BeginPopupModal("hex.view.pattern.accept_pattern"_lang, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextWrapped("hex.view.pattern.accept_pattern.desc"_lang);
 
-            char *entries[this->m_possiblePatternFiles.size()];
+            std::vector<std::string> entries;
+            entries.resize(this->m_possiblePatternFiles.size());
 
-            for (u32 i = 0; i < this->m_possiblePatternFiles.size(); i++) {
-                entries[i] = this->m_possiblePatternFiles[i].data();
+            for (u32 i = 0; i < entries.size(); i++) {
+                entries[i] = std::filesystem::path(this->m_possiblePatternFiles[i]).filename().string();
             }
 
-            ImGui::ListBox("hex.view.pattern.accept_pattern.patterns"_lang, &this->m_selectedPatternFile, entries, IM_ARRAYSIZE(entries), 4);
+            ImGui::ListBox("hex.view.pattern.accept_pattern.patterns"_lang, &this->m_selectedPatternFile, [](void *data, int id, const char** outText) -> bool {
+                auto &entries = *static_cast<std::vector<std::string>*>(data);
+
+                *outText = entries[id].c_str();
+
+                return true;
+            }, &entries, entries.size(), 4);
 
             ImGui::NewLine();
             ImGui::Text("hex.view.pattern.accept_pattern.question"_lang);

@@ -46,7 +46,7 @@ namespace hex::lang {
                     auto parent = currPattern->getParent();
 
                     if (parent == nullptr) {
-                        this->getConsole().abortEvaluation(hex::format("no parent available for identifier '{0}'", currPattern->getVariableName()));
+                        this->getConsole().abortEvaluation("no parent available for identifier");
                     } else {
                         currPattern = parent;
                     }
@@ -80,8 +80,10 @@ namespace hex::lang {
 
                     if (currPattern != nullptr) {
                         if (auto arrayPattern = dynamic_cast<PatternDataArray*>(currPattern); arrayPattern != nullptr) {
-                            if (Token::isFloatingPoint(arrayIndexNode->getType()))
-                                this->getConsole().abortEvaluation("cannot use float to index into array");
+                            std::visit([this](auto &&arrayIndex) {
+                                if (std::is_floating_point_v<decltype(arrayIndex)>)
+                                    this->getConsole().abortEvaluation("cannot use float to index into array");
+                            }, arrayIndexNode->getValue());
 
                             std::visit([&](auto &&arrayIndex){
                                 if (arrayIndex >= 0 && arrayIndex < arrayPattern->getEntries().size())
@@ -110,9 +112,14 @@ namespace hex::lang {
 
         PatternData *currPattern = nullptr;
 
-        // Local member access
-        if (!this->m_currMembers.empty())
-            currPattern = this->findPattern(*this->m_currMembers.back(), path);
+        // Local variable access
+        if (!this->m_localVariables.empty())
+            currPattern = this->findPattern(*this->m_localVariables.back(), path);
+
+        // If no local variable was found try local structure members
+        if (this->m_currMembers.size() > 1) {
+            currPattern = this->findPattern(*this->m_currMembers[this->m_currMembers.size() - 2], path);
+        }
 
         // If no local member was found, try globally
         if (currPattern == nullptr) {
@@ -141,50 +148,57 @@ namespace hex::lang {
     }
 
     ASTNodeIntegerLiteral* Evaluator::evaluateRValue(ASTNodeRValue *node) {
-        if (this->m_currMembers.empty() && this->m_globalMembers.empty())
-            this->getConsole().abortEvaluation("no variables available");
-
         if (node->getPath().size() == 1) {
             if (auto part = std::get_if<std::string>(&node->getPath()[0]); part != nullptr && *part == "$")
-                return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned64Bit, this->m_currOffset });
+                return new ASTNodeIntegerLiteral(this->m_currOffset);
         }
 
         auto currPattern = this->patternFromName(node->getPath());
 
         if (auto unsignedPattern = dynamic_cast<PatternDataUnsigned*>(currPattern); unsignedPattern != nullptr) {
+
             u8 value[unsignedPattern->getSize()];
-            this->m_provider->read(unsignedPattern->getOffset(), value, unsignedPattern->getSize());
+            if (currPattern->isLocal())
+                std::memcpy(value, this->m_localStack.data() + unsignedPattern->getOffset(), unsignedPattern->getSize());
+            else
+                this->m_provider->read(unsignedPattern->getOffset(), value, unsignedPattern->getSize());
 
             switch (unsignedPattern->getSize()) {
-                case 1:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned8Bit,   hex::changeEndianess(*reinterpret_cast<u8*>(value),   1,  unsignedPattern->getEndian()) });
-                case 2:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned16Bit,  hex::changeEndianess(*reinterpret_cast<u16*>(value),  2,  unsignedPattern->getEndian()) });
-                case 4:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned32Bit,  hex::changeEndianess(*reinterpret_cast<u32*>(value),  4,  unsignedPattern->getEndian()) });
-                case 8:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned64Bit,  hex::changeEndianess(*reinterpret_cast<u64*>(value),  8,  unsignedPattern->getEndian()) });
-                case 16: return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned128Bit, hex::changeEndianess(*reinterpret_cast<u128*>(value), 16, unsignedPattern->getEndian()) });
+                case 1:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u8*>(value),   1,  unsignedPattern->getEndian()));
+                case 2:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u16*>(value),  2,  unsignedPattern->getEndian()));
+                case 4:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u32*>(value),  4,  unsignedPattern->getEndian()));
+                case 8:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u64*>(value),  8,  unsignedPattern->getEndian()));
+                case 16: return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u128*>(value), 16, unsignedPattern->getEndian()));
                 default: this->getConsole().abortEvaluation("invalid rvalue size");
             }
         } else if (auto signedPattern = dynamic_cast<PatternDataSigned*>(currPattern); signedPattern != nullptr) {
             u8 value[signedPattern->getSize()];
-            this->m_provider->read(signedPattern->getOffset(), value, signedPattern->getSize());
+            if (currPattern->isLocal())
+                std::memcpy(value, this->m_localStack.data() + signedPattern->getOffset(), signedPattern->getSize());
+            else
+                this->m_provider->read(signedPattern->getOffset(), value, signedPattern->getSize());
 
             switch (signedPattern->getSize()) {
-                case 1:  return new ASTNodeIntegerLiteral({ Token::ValueType::Signed8Bit,   hex::changeEndianess(*reinterpret_cast<s8*>(value),   1,  signedPattern->getEndian()) });
-                case 2:  return new ASTNodeIntegerLiteral({ Token::ValueType::Signed16Bit,  hex::changeEndianess(*reinterpret_cast<s16*>(value),  2,  signedPattern->getEndian()) });
-                case 4:  return new ASTNodeIntegerLiteral({ Token::ValueType::Signed32Bit,  hex::changeEndianess(*reinterpret_cast<s32*>(value),  4,  signedPattern->getEndian()) });
-                case 8:  return new ASTNodeIntegerLiteral({ Token::ValueType::Signed64Bit,  hex::changeEndianess(*reinterpret_cast<s64*>(value),  8,  signedPattern->getEndian()) });
-                case 16: return new ASTNodeIntegerLiteral({ Token::ValueType::Signed128Bit, hex::changeEndianess(*reinterpret_cast<s128*>(value), 16, signedPattern->getEndian()) });
+                case 1:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<s8*>(value),   1,  signedPattern->getEndian()));
+                case 2:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<s16*>(value),  2,  signedPattern->getEndian()));
+                case 4:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<s32*>(value),  4,  signedPattern->getEndian()));
+                case 8:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<s64*>(value),  8,  signedPattern->getEndian()));
+                case 16: return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<s128*>(value), 16, signedPattern->getEndian()));
                 default: this->getConsole().abortEvaluation("invalid rvalue size");
             }
         } else if (auto enumPattern = dynamic_cast<PatternDataEnum*>(currPattern); enumPattern != nullptr) {
             u8 value[enumPattern->getSize()];
-            this->m_provider->read(enumPattern->getOffset(), value, enumPattern->getSize());
+            if (currPattern->isLocal())
+                std::memcpy(value, this->m_localStack.data() + enumPattern->getOffset(), enumPattern->getSize());
+            else
+                this->m_provider->read(enumPattern->getOffset(), value, enumPattern->getSize());
 
             switch (enumPattern->getSize()) {
-                case 1:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned8Bit,   hex::changeEndianess(*reinterpret_cast<u8*>(value),   1,  enumPattern->getEndian()) });
-                case 2:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned16Bit,  hex::changeEndianess(*reinterpret_cast<u16*>(value),  2,  enumPattern->getEndian()) });
-                case 4:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned32Bit,  hex::changeEndianess(*reinterpret_cast<u32*>(value),  4,  enumPattern->getEndian()) });
-                case 8:  return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned64Bit,  hex::changeEndianess(*reinterpret_cast<u64*>(value),  8,  enumPattern->getEndian()) });
-                case 16: return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned128Bit, hex::changeEndianess(*reinterpret_cast<u128*>(value), 16, enumPattern->getEndian()) });
+                case 1:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u8*>(value),   1,  enumPattern->getEndian()));
+                case 2:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u16*>(value),  2,  enumPattern->getEndian()));
+                case 4:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u32*>(value),  4,  enumPattern->getEndian()));
+                case 8:  return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u64*>(value),  8,  enumPattern->getEndian()));
+                case 16: return new ASTNodeIntegerLiteral(hex::changeEndianess(*reinterpret_cast<u128*>(value), 16, enumPattern->getEndian()));
                 default: this->getConsole().abortEvaluation("invalid rvalue size");
             }
         } else
@@ -201,31 +215,34 @@ namespace hex::lang {
         for (auto &param : node->getParams()) {
             if (auto numericExpression = dynamic_cast<ASTNodeNumericExpression*>(param); numericExpression != nullptr)
                 evaluatedParams.push_back(this->evaluateMathematicalExpression(numericExpression));
-            else if (auto typeOperatorExpression = dynamic_cast<ASTNodeTypeOperator*>(param))
+            else if (auto typeOperatorExpression = dynamic_cast<ASTNodeTypeOperator*>(param); typeOperatorExpression != nullptr)
                 evaluatedParams.push_back(this->evaluateTypeOperator(typeOperatorExpression));
             else if (auto stringLiteral = dynamic_cast<ASTNodeStringLiteral*>(param); stringLiteral != nullptr)
                 evaluatedParams.push_back(stringLiteral->clone());
         }
 
-        if (!ContentRegistry::PatternLanguageFunctions::getEntries().contains(node->getFunctionName().data()))
+        ContentRegistry::PatternLanguageFunctions::Function *function;
+        if (this->m_definedFunctions.contains(node->getFunctionName().data()))
+            function = &this->m_definedFunctions[node->getFunctionName().data()];
+        else if (ContentRegistry::PatternLanguageFunctions::getEntries().contains(node->getFunctionName().data()))
+            function = &ContentRegistry::PatternLanguageFunctions::getEntries()[node->getFunctionName().data()];
+        else
             this->getConsole().abortEvaluation(hex::format("no function named '{0}' found", node->getFunctionName().data()));
 
-        auto &function = ContentRegistry::PatternLanguageFunctions::getEntries()[node->getFunctionName().data()];
-
-        if (function.parameterCount == ContentRegistry::PatternLanguageFunctions::UnlimitedParameters) {
+        if (function->parameterCount == ContentRegistry::PatternLanguageFunctions::UnlimitedParameters) {
             ; // Don't check parameter count
         }
-        else if (function.parameterCount & ContentRegistry::PatternLanguageFunctions::LessParametersThan) {
-            if (evaluatedParams.size() >= (function.parameterCount & ~ContentRegistry::PatternLanguageFunctions::LessParametersThan))
-                this->getConsole().abortEvaluation(hex::format("too many parameters for function '{0}'. Expected {1}", node->getFunctionName().data(), function.parameterCount & ~ContentRegistry::PatternLanguageFunctions::LessParametersThan));
-        } else if (function.parameterCount & ContentRegistry::PatternLanguageFunctions::MoreParametersThan) {
-            if (evaluatedParams.size() <= (function.parameterCount & ~ContentRegistry::PatternLanguageFunctions::MoreParametersThan))
-                this->getConsole().abortEvaluation(hex::format("too few parameters for function '{0}'. Expected {1}", node->getFunctionName().data(), function.parameterCount & ~ContentRegistry::PatternLanguageFunctions::MoreParametersThan));
-        } else if (function.parameterCount != evaluatedParams.size()) {
-            this->getConsole().abortEvaluation(hex::format("invalid number of parameters for function '{0}'. Expected {1}", node->getFunctionName().data(), function.parameterCount));
+        else if (function->parameterCount & ContentRegistry::PatternLanguageFunctions::LessParametersThan) {
+            if (evaluatedParams.size() >= (function->parameterCount & ~ContentRegistry::PatternLanguageFunctions::LessParametersThan))
+                this->getConsole().abortEvaluation(hex::format("too many parameters for function '{0}'. Expected {1}", node->getFunctionName().data(), function->parameterCount & ~ContentRegistry::PatternLanguageFunctions::LessParametersThan));
+        } else if (function->parameterCount & ContentRegistry::PatternLanguageFunctions::MoreParametersThan) {
+            if (evaluatedParams.size() <= (function->parameterCount & ~ContentRegistry::PatternLanguageFunctions::MoreParametersThan))
+                this->getConsole().abortEvaluation(hex::format("too few parameters for function '{0}'. Expected {1}", node->getFunctionName().data(), function->parameterCount & ~ContentRegistry::PatternLanguageFunctions::MoreParametersThan));
+        } else if (function->parameterCount != evaluatedParams.size()) {
+            this->getConsole().abortEvaluation(hex::format("invalid number of parameters for function '{0}'. Expected {1}", node->getFunctionName().data(), function->parameterCount));
         }
 
-        return function.func(*this, evaluatedParams);
+        return function->func(*this, evaluatedParams);
     }
 
     ASTNodeIntegerLiteral* Evaluator::evaluateTypeOperator(ASTNodeTypeOperator *typeOperatorNode) {
@@ -234,9 +251,9 @@ namespace hex::lang {
 
             switch (typeOperatorNode->getOperator()) {
                 case Token::Operator::AddressOf:
-                    return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned64Bit, static_cast<u64>(pattern->getOffset()) });
+                    return new ASTNodeIntegerLiteral(static_cast<u64>(pattern->getOffset()));
                 case Token::Operator::SizeOf:
-                    return new ASTNodeIntegerLiteral({ Token::ValueType::Unsigned64Bit, static_cast<u64>(pattern->getSize()) });
+                    return new ASTNodeIntegerLiteral(static_cast<u64>(pattern->getSize()));
                 default:
                     this->getConsole().abortEvaluation("invalid type operator used. This is a bug!");
             }
@@ -284,84 +301,55 @@ namespace hex::lang {
     }
 
     ASTNodeIntegerLiteral* Evaluator::evaluateOperator(ASTNodeIntegerLiteral *left, ASTNodeIntegerLiteral *right, Token::Operator op) {
-        auto newType = [&] {
-            #define CHECK_TYPE(type) if (left->getType() == (type) || right->getType() == (type)) return (type)
-            #define DEFAULT_TYPE(type) return (type)
-
-            if (left->getType() == Token::ValueType::Any && right->getType() != Token::ValueType::Any)
-                return right->getType();
-            if (left->getType() != Token::ValueType::Any && right->getType() == Token::ValueType::Any)
-                return left->getType();
-
-            CHECK_TYPE(Token::ValueType::Double);
-            CHECK_TYPE(Token::ValueType::Float);
-            CHECK_TYPE(Token::ValueType::Unsigned128Bit);
-            CHECK_TYPE(Token::ValueType::Signed128Bit);
-            CHECK_TYPE(Token::ValueType::Unsigned64Bit);
-            CHECK_TYPE(Token::ValueType::Signed64Bit);
-            CHECK_TYPE(Token::ValueType::Unsigned32Bit);
-            CHECK_TYPE(Token::ValueType::Signed32Bit);
-            CHECK_TYPE(Token::ValueType::Unsigned16Bit);
-            CHECK_TYPE(Token::ValueType::Signed16Bit);
-            CHECK_TYPE(Token::ValueType::Unsigned8Bit);
-            CHECK_TYPE(Token::ValueType::Signed8Bit);
-            CHECK_TYPE(Token::ValueType::Character);
-            CHECK_TYPE(Token::ValueType::Boolean);
-            DEFAULT_TYPE(Token::ValueType::Signed32Bit);
-
-            #undef CHECK_TYPE
-            #undef DEFAULT_TYPE
-        }();
-
         try {
             return std::visit([&](auto &&leftValue, auto &&rightValue) -> ASTNodeIntegerLiteral * {
                 switch (op) {
                     case Token::Operator::Plus:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue + rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue + rightValue);
                     case Token::Operator::Minus:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue - rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue - rightValue);
                     case Token::Operator::Star:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue * rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue * rightValue);
                     case Token::Operator::Slash:
                         if (rightValue == 0)
                             this->getConsole().abortEvaluation("Division by zero");
-                        return new ASTNodeIntegerLiteral({ newType, leftValue / rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue / rightValue);
                     case Token::Operator::Percent:
                         if (rightValue == 0)
                             this->getConsole().abortEvaluation("Division by zero");
-                        return new ASTNodeIntegerLiteral({ newType, modulus(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(modulus(leftValue, rightValue));
                     case Token::Operator::ShiftLeft:
-                        return new ASTNodeIntegerLiteral({ newType, shiftLeft(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(shiftLeft(leftValue, rightValue));
                     case Token::Operator::ShiftRight:
-                        return new ASTNodeIntegerLiteral({ newType, shiftRight(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(shiftRight(leftValue, rightValue));
                     case Token::Operator::BitAnd:
-                        return new ASTNodeIntegerLiteral({ newType, bitAnd(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(bitAnd(leftValue, rightValue));
                     case Token::Operator::BitXor:
-                        return new ASTNodeIntegerLiteral({ newType, bitXor(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(bitXor(leftValue, rightValue));
                     case Token::Operator::BitOr:
-                        return new ASTNodeIntegerLiteral({ newType, bitOr(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(bitOr(leftValue, rightValue));
                     case Token::Operator::BitNot:
-                        return new ASTNodeIntegerLiteral({ newType, bitNot(leftValue, rightValue) });
+                        return new ASTNodeIntegerLiteral(bitNot(leftValue, rightValue));
                     case Token::Operator::BoolEquals:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue == rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue == rightValue);
                     case Token::Operator::BoolNotEquals:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue != rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue != rightValue);
                     case Token::Operator::BoolGreaterThan:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue > rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue > rightValue);
                     case Token::Operator::BoolLessThan:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue < rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue < rightValue);
                     case Token::Operator::BoolGreaterThanOrEquals:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue >= rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue >= rightValue);
                     case Token::Operator::BoolLessThanOrEquals:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue <= rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue <= rightValue);
                     case Token::Operator::BoolAnd:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue && rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue && rightValue);
                     case Token::Operator::BoolXor:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue && !rightValue || !leftValue && rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue && !rightValue || !leftValue && rightValue);
                     case Token::Operator::BoolOr:
-                        return new ASTNodeIntegerLiteral({ newType, leftValue || rightValue });
+                        return new ASTNodeIntegerLiteral(leftValue || rightValue);
                     case Token::Operator::BoolNot:
-                        return new ASTNodeIntegerLiteral({ newType, !rightValue });
+                        return new ASTNodeIntegerLiteral(!rightValue);
                     default:
                         this->getConsole().abortEvaluation("invalid operator used in mathematical expression");
                 }
@@ -421,6 +409,173 @@ namespace hex::lang {
         return evaluateOperator(leftInteger, rightInteger, node->getOperator());
     }
 
+    void Evaluator::createLocalVariable(std::string_view varName, PatternData *pattern) {
+        auto startOffset = this->m_currOffset;
+        ON_SCOPE_EXIT { this->m_currOffset = startOffset; };
+
+        auto endOfStack = this->m_localStack.size();
+
+        for (auto &variable : *this->m_localVariables.back()) {
+            if (variable->getVariableName() == varName)
+                this->getConsole().abortEvaluation(hex::format("redefinition of variable {}", varName));
+        }
+
+        this->m_localStack.resize(endOfStack + pattern->getSize());
+
+        pattern->setVariableName(std::string(varName));
+        pattern->setOffset(endOfStack);
+        pattern->setLocal(true);
+        this->m_localVariables.back()->push_back(pattern);
+        std::memset(this->m_localStack.data() + pattern->getOffset(), 0x00, pattern->getSize());
+
+    }
+
+    void Evaluator::setLocalVariableValue(std::string_view varName, const void *value, size_t size) {
+        PatternData *varPattern = nullptr;
+        for (auto &var : *this->m_localVariables.back()) {
+            if (var->getVariableName() == varName)
+                varPattern = var;
+        }
+
+        std::memset(this->m_localStack.data() + varPattern->getOffset(), 0x00, varPattern->getSize());
+        std::memcpy(this->m_localStack.data() + varPattern->getOffset(), value, std::min(varPattern->getSize(), size));
+    }
+
+    void Evaluator::evaluateFunctionDefinition(ASTNodeFunctionDefinition *node) {
+        ContentRegistry::PatternLanguageFunctions::Function function = {
+                (u32)node->getParams().size(),
+                [paramNames = node->getParams(), body = node->getBody()](Evaluator& evaluator, std::vector<ASTNode*> &params) -> ASTNode* {
+                    // Create local variables from parameters
+                    std::vector<PatternData*> localVariables;
+                    evaluator.m_localVariables.push_back(&localVariables);
+
+                    ON_SCOPE_EXIT {
+                        u32 stackSizeToDrop = 0;
+                        for (auto &localVar : *evaluator.m_localVariables.back()) {
+                            stackSizeToDrop += localVar->getSize();
+                            delete localVar;
+                        }
+                        evaluator.m_localVariables.pop_back();
+                        evaluator.m_localStack.resize(evaluator.m_localStack.size() - stackSizeToDrop);
+                    };
+
+                    auto startOffset = evaluator.m_currOffset;
+                    for (u32 i = 0; i < params.size(); i++) {
+                        if (auto integerLiteralNode = dynamic_cast<ASTNodeIntegerLiteral*>(params[i]); integerLiteralNode != nullptr) {
+                            std::visit([&](auto &&value) {
+                                using Type = std::remove_cvref_t<decltype(value)>;
+
+                                PatternData *pattern;
+                                if constexpr (std::is_unsigned_v<Type>)
+                                    pattern = new PatternDataUnsigned(0, sizeof(value));
+                                else if constexpr (std::is_signed_v<Type>)
+                                    pattern = new PatternDataSigned(0, sizeof(value));
+                                else if constexpr (std::is_floating_point_v<Type>)
+                                    pattern = new PatternDataFloat(0, sizeof(value));
+                                else return;
+
+                                evaluator.createLocalVariable(paramNames[i], pattern);
+                                evaluator.setLocalVariableValue(paramNames[i], &value, sizeof(value));
+                            }, integerLiteralNode->getValue());
+                        }
+                    }
+                    evaluator.m_currOffset = startOffset;
+
+                    return evaluator.evaluateFunctionBody(body).value_or(nullptr);
+                }
+        };
+
+        if (this->m_definedFunctions.contains(std::string(node->getName())))
+            this->getConsole().abortEvaluation(hex::format("redefinition of function {}", node->getName()));
+
+        this->m_definedFunctions.insert({ std::string(node->getName()), function });
+    }
+
+    std::optional<ASTNode*> Evaluator::evaluateFunctionBody(const std::vector<ASTNode*> &body) {
+        std::optional<ASTNode*> returnResult;
+        auto startOffset = this->m_currOffset;
+
+        for (auto &statement : body) {
+            ON_SCOPE_EXIT { this->m_currOffset = startOffset; };
+
+            if (auto functionCallNode = dynamic_cast<ASTNodeFunctionCall*>(statement); functionCallNode != nullptr) {
+                auto result = this->evaluateFunctionCall(functionCallNode);
+                delete result;
+            } else if (auto varDeclNode = dynamic_cast<ASTNodeVariableDecl*>(statement); varDeclNode != nullptr) {
+                auto pattern = this->evaluateVariable(varDeclNode);
+                this->createLocalVariable(varDeclNode->getName(), pattern);
+            } else if (auto assignmentNode = dynamic_cast<ASTNodeAssignment*>(statement); assignmentNode != nullptr) {
+                if (auto numericExpressionNode = dynamic_cast<ASTNodeNumericExpression*>(assignmentNode->getRValue()); numericExpressionNode != nullptr) {
+                    auto value = this->evaluateMathematicalExpression(numericExpressionNode);
+                    ON_SCOPE_EXIT { delete value; };
+
+                    std::visit([&](auto &&value) {
+                        this->setLocalVariableValue(assignmentNode->getLValueName(), &value, sizeof(value));
+                    }, value->getValue());
+                } else {
+                    this->getConsole().abortEvaluation("invalid rvalue used in assignment");
+                }
+            } else if (auto returnNode = dynamic_cast<ASTNodeReturnStatement*>(statement); returnNode != nullptr) {
+                if (returnNode->getRValue() == nullptr) {
+                    returnResult = nullptr;
+                } else if (auto numericExpressionNode = dynamic_cast<ASTNodeNumericExpression*>(returnNode->getRValue()); numericExpressionNode != nullptr) {
+                    returnResult = this->evaluateMathematicalExpression(numericExpressionNode);
+                } else {
+                    this->getConsole().abortEvaluation("invalid rvalue used in return statement");
+                }
+            } else if (auto conditionalNode = dynamic_cast<ASTNodeConditionalStatement*>(statement); conditionalNode != nullptr) {
+                if (auto numericExpressionNode = dynamic_cast<ASTNodeNumericExpression*>(conditionalNode->getCondition()); numericExpressionNode != nullptr) {
+                    auto condition = this->evaluateMathematicalExpression(numericExpressionNode);
+
+                    u32 localVariableStartCount = this->m_localVariables.back()->size();
+                    u32 localVariableStackStartSize = this->m_localStack.size();
+
+                    if (std::visit([](auto &&value) { return value != 0; }, condition->getValue()))
+                        returnResult = this->evaluateFunctionBody(conditionalNode->getTrueBody());
+                    else
+                        returnResult = this->evaluateFunctionBody(conditionalNode->getFalseBody());
+
+                    for (u32 i = localVariableStartCount; i < this->m_localVariables.back()->size(); i++)
+                        delete (*this->m_localVariables.back())[i];
+                    this->m_localVariables.back()->resize(localVariableStartCount);
+                    this->m_localStack.resize(localVariableStackStartSize);
+
+                } else {
+                    this->getConsole().abortEvaluation("invalid rvalue used in return statement");
+                }
+            } else if (auto whileLoopNode = dynamic_cast<ASTNodeWhileStatement*>(statement); whileLoopNode != nullptr) {
+                if (auto numericExpressionNode = dynamic_cast<ASTNodeNumericExpression*>(whileLoopNode->getCondition()); numericExpressionNode != nullptr) {
+                    auto condition = this->evaluateMathematicalExpression(numericExpressionNode);
+
+                    while (std::visit([](auto &&value) { return value != 0; }, condition->getValue())) {
+                        u32 localVariableStartCount = this->m_localVariables.back()->size();
+                        u32 localVariableStackStartSize = this->m_localStack.size();
+
+                        returnResult = this->evaluateFunctionBody(whileLoopNode->getBody());
+                        if (returnResult.has_value())
+                            break;
+
+                        for (u32 i = localVariableStartCount; i < this->m_localVariables.back()->size(); i++)
+                            delete (*this->m_localVariables.back())[i];
+                        this->m_localVariables.back()->resize(localVariableStartCount);
+                        this->m_localStack.resize(localVariableStackStartSize);
+
+                        condition = this->evaluateMathematicalExpression(numericExpressionNode);
+                    }
+
+                } else {
+                    this->getConsole().abortEvaluation("invalid rvalue used in return statement");
+                }
+            }
+
+            if (returnResult.has_value())
+                return returnResult.value();
+        }
+
+
+        return { };
+    }
+
     PatternData* Evaluator::evaluateAttributes(ASTNode *currNode, PatternData *currPattern) {
         auto attributableNode = dynamic_cast<Attributable*>(currNode);
         if (attributableNode == nullptr)
@@ -434,6 +589,8 @@ namespace hex::lang {
                 currPattern->setVariableName(value->data());
             else if (attribute == "comment" && value.has_value())
                 currPattern->setComment(value->data());
+            else if (attribute == "hidden" && value.has_value())
+                currPattern->setHidden(true);
             else
                 this->getConsole().abortEvaluation("unknown or invalid attribute");
 
@@ -475,6 +632,8 @@ namespace hex::lang {
 
         if (type == Token::ValueType::Character)
             pattern = new PatternDataCharacter(this->m_currOffset);
+        else if (type == Token::ValueType::Character16)
+            pattern = new PatternDataCharacter16(this->m_currOffset);
         else if (type == Token::ValueType::Boolean)
             pattern = new PatternDataBoolean(this->m_currOffset);
         else if (Token::isUnsigned(type))
@@ -483,6 +642,8 @@ namespace hex::lang {
             pattern = new PatternDataSigned(this->m_currOffset, typeSize);
         else if (Token::isFloatingPoint(type))
             pattern = new PatternDataFloat(this->m_currOffset, typeSize);
+        else if (type == Token::ValueType::Padding)
+            pattern = new PatternDataPadding(this->m_currOffset, 1);
         else
             this->getConsole().abortEvaluation("invalid builtin type");
 
@@ -613,7 +774,7 @@ namespace hex::lang {
             auto valueNode = evaluateMathematicalExpression(expression);
             ON_SCOPE_EXIT { delete valueNode; };
 
-            entryPatterns.emplace_back(Token::castTo(builtinUnderlyingType->getType(), valueNode->getValue()), name);
+            entryPatterns.emplace_back(valueNode->getValue(), name);
         }
 
         this->m_currOffset += size;
@@ -638,8 +799,9 @@ namespace hex::lang {
             auto valueNode = evaluateMathematicalExpression(expression);
             ON_SCOPE_EXIT { delete valueNode; };
 
-            auto fieldBits = std::visit([this, node, type = valueNode->getType()] (auto &&value) {
-                if (Token::isFloatingPoint(type))
+            auto fieldBits = std::visit([this] (auto &&value) {
+                using Type = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::is_floating_point_v<Type>)
                     this->getConsole().abortEvaluation("bitfield entry size must be an integer value");
                 return static_cast<s128>(value);
             }, valueNode->getValue());
@@ -702,9 +864,10 @@ namespace hex::lang {
             auto valueNode = evaluateMathematicalExpression(offset);
             ON_SCOPE_EXIT { delete valueNode; };
 
-            this->m_currOffset = std::visit([this, node, type = valueNode->getType()] (auto &&value) {
-                if (Token::isFloatingPoint(type))
-                    this->getConsole().abortEvaluation("placement offset must be an integer value");
+            this->m_currOffset = std::visit([this] (auto &&value) {
+                using Type = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::is_floating_point_v<Type>)
+                    this->getConsole().abortEvaluation("bitfield entry size must be an integer value");
                 return static_cast<u64>(value);
             }, valueNode->getValue());
         }
@@ -731,17 +894,20 @@ namespace hex::lang {
 
     PatternData* Evaluator::evaluateArray(ASTNodeArrayVariableDecl *node) {
 
+        // Evaluate placement of array
         if (auto offset = dynamic_cast<ASTNodeNumericExpression*>(node->getPlacementOffset()); offset != nullptr) {
             auto valueNode = evaluateMathematicalExpression(offset);
             ON_SCOPE_EXIT { delete valueNode; };
 
-            this->m_currOffset = std::visit([this, node, type = valueNode->getType()] (auto &&value) {
-                if (Token::isFloatingPoint(type))
-                    this->getConsole().abortEvaluation("placement offset must be an integer value");
+            this->m_currOffset = std::visit([this] (auto &&value) {
+                using Type = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::is_floating_point_v<Type>)
+                    this->getConsole().abortEvaluation("bitfield entry size must be an integer value");
                 return static_cast<u64>(value);
             }, valueNode->getValue());
         }
 
+        // Check if placed in range of the data
         if (this->m_currOffset < this->m_provider->getBaseAddress() || this->m_currOffset >= this->m_provider->getActualSize() + this->m_provider->getBaseAddress()) {
             if (node->getPlacementOffset() != nullptr)
                 this->getConsole().abortEvaluation("variable placed out of range");
@@ -751,55 +917,19 @@ namespace hex::lang {
 
         auto startOffset = this->m_currOffset;
 
-        ASTNodeIntegerLiteral *valueNode;
-        u64 arraySize = 0;
-
-        if (node->getSize() != nullptr) {
-            if (auto sizeNumericExpression = dynamic_cast<ASTNodeNumericExpression*>(node->getSize()); sizeNumericExpression != nullptr)
-                valueNode = evaluateMathematicalExpression(sizeNumericExpression);
-            else
-                this->getConsole().abortEvaluation("array size not a numeric expression");
-
-            ON_SCOPE_EXIT { delete valueNode; };
-
-            arraySize = std::visit([this, node, type = valueNode->getType()] (auto &&value) {
-                if (Token::isFloatingPoint(type))
-                    this->getConsole().abortEvaluation("array size must be an integer value");
-                return static_cast<u64>(value);
-            }, valueNode->getValue());
-
-            if (auto typeDecl = dynamic_cast<ASTNodeTypeDecl*>(node->getType()); typeDecl != nullptr) {
-                if (auto builtinType = dynamic_cast<ASTNodeBuiltinType*>(typeDecl->getType()); builtinType != nullptr) {
-                    if (builtinType->getType() == Token::ValueType::Padding) {
-                        this->m_currOffset += arraySize;
-                        return new PatternDataPadding(startOffset, arraySize);
-                    }
-                }
-            }
-        } else {
-            u8 currByte = 0x00;
-            u64 offset = startOffset;
-
-            do {
-                this->m_provider->read(offset, &currByte, sizeof(u8));
-                offset += sizeof(u8);
-                arraySize += sizeof(u8);
-            } while (currByte != 0x00 && offset < this->m_provider->getSize());
-        }
-
         std::vector<PatternData*> entries;
         std::optional<u32> color;
-        for (s128 i = 0; i < arraySize; i++) {
+
+        auto addEntry = [this, node, &entries, &color](u64 index) {
             PatternData *entry;
             if (auto typeDecl = dynamic_cast<ASTNodeTypeDecl*>(node->getType()); typeDecl != nullptr)
                 entry = this->evaluateType(typeDecl);
-            else if (auto builtinTypeDecl = dynamic_cast<ASTNodeBuiltinType*>(node->getType()); builtinTypeDecl != nullptr) {
+            else if (auto builtinTypeDecl = dynamic_cast<ASTNodeBuiltinType*>(node->getType()); builtinTypeDecl != nullptr)
                 entry = this->evaluateBuiltinType(builtinTypeDecl);
-            }
             else
                 this->getConsole().abortEvaluation("ASTNodeVariableDecl had an invalid type. This is a bug!");
 
-            entry->setVariableName(hex::format("[{0}]", (u64)i));
+            entry->setVariableName(hex::format("[{0}]", index));
             entry->setEndian(this->getCurrentEndian());
 
             if (!color.has_value())
@@ -808,25 +938,89 @@ namespace hex::lang {
 
             if (this->m_currOffset > this->m_provider->getActualSize() + this->m_provider->getBaseAddress()) {
                 delete entry;
-                break;
+                return;
             }
 
             entries.push_back(entry);
+        };
 
+        auto sizeNode = node->getSize();
+        if (auto numericExpression = dynamic_cast<ASTNodeNumericExpression*>(sizeNode); numericExpression != nullptr) {
+            // Parse explicit size of array
+            auto valueNode = this->evaluateMathematicalExpression(numericExpression);
+            ON_SCOPE_EXIT { delete valueNode; };
+
+            auto arraySize = std::visit([this] (auto &&value) {
+                using Type = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::is_floating_point_v<Type>)
+                    this->getConsole().abortEvaluation("bitfield entry size must be an integer value");
+                return static_cast<u64>(value);
+            }, valueNode->getValue());
+
+            for (u64 i = 0; i < arraySize; i++) {
+                addEntry(i);
+            }
+
+        } else if (auto whileLoopExpression = dynamic_cast<ASTNodeWhileStatement*>(sizeNode); whileLoopExpression != nullptr) {
+            // Parse while loop based size of array
+            auto conditionNode = this->evaluateMathematicalExpression(static_cast<ASTNodeNumericExpression*>(whileLoopExpression->getCondition()));
+            ON_SCOPE_EXIT { delete conditionNode; };
+
+            u64 index = 0;
+            while (std::visit([](auto &&value) { return value != 0; }, conditionNode->getValue())) {
+
+                addEntry(index);
+                index++;
+
+                delete conditionNode;
+                conditionNode = this->evaluateMathematicalExpression(static_cast<ASTNodeNumericExpression*>(whileLoopExpression->getCondition()));
+            }
+        } else {
+            // Parse unsized array
+
+            if (auto typeDecl = dynamic_cast<ASTNodeTypeDecl*>(node->getType()); typeDecl != nullptr) {
+                if (auto builtinType = dynamic_cast<ASTNodeBuiltinType*>(typeDecl->getType()); builtinType != nullptr) {
+                    std::vector<u8> bytes(Token::getTypeSize(builtinType->getType()), 0x00);
+                    u64 offset = startOffset;
+
+                    u64 index = 0;
+                    do {
+                        this->m_provider->read(offset, bytes.data(), bytes.size());
+                        offset += bytes.size();
+                        addEntry(index);
+                        index++;
+                    } while (!std::all_of(bytes.begin(), bytes.end(), [](u8 byte){ return byte == 0x00; }) && offset < this->m_provider->getSize());
+                }
+            }
+        }
+
+        auto deleteEntries = SCOPE_GUARD {
+            for (auto &entry : entries)
+                delete entry;
+        };
+
+        if (auto typeDecl = dynamic_cast<ASTNodeTypeDecl*>(node->getType()); typeDecl != nullptr) {
+            if (auto builtinType = dynamic_cast<ASTNodeBuiltinType *>(typeDecl->getType()); builtinType != nullptr) {
+                if (builtinType->getType() == Token::ValueType::Padding)
+                    return new PatternDataPadding(startOffset, this->m_currOffset - startOffset);
+            }
         }
 
         PatternData *pattern;
-        if (entries.empty()) {
+        if (entries.empty())
             pattern = new PatternDataPadding(startOffset, 0);
-        }
-        else if (dynamic_cast<PatternDataCharacter*>(entries[0]))
+        else if (dynamic_cast<PatternDataCharacter*>(entries[0]) != nullptr)
             pattern = new PatternDataString(startOffset, (this->m_currOffset - startOffset), color.value_or(0));
+        else if (dynamic_cast<PatternDataCharacter16*>(entries[0]) != nullptr)
+            pattern = new PatternDataString16(startOffset, (this->m_currOffset - startOffset), color.value_or(0));
         else {
             if (node->getSize() == nullptr)
                 this->getConsole().abortEvaluation("no bounds provided for array");
             auto arrayPattern = new PatternDataArray(startOffset, (this->m_currOffset - startOffset), color.value_or(0));
 
             arrayPattern->setEntries(entries);
+            deleteEntries.release();
+
             pattern = arrayPattern;
         }
 
@@ -841,9 +1035,10 @@ namespace hex::lang {
             auto valueNode = evaluateMathematicalExpression(offset);
             ON_SCOPE_EXIT { delete valueNode; };
 
-            pointerOffset = std::visit([this, node, type = valueNode->getType()] (auto &&value) {
-                if (Token::isFloatingPoint(type))
-                    this->getConsole().abortEvaluation("pointer offset must be an integer value");
+            pointerOffset = std::visit([this] (auto &&value) {
+                using Type = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::is_floating_point_v<Type>)
+                    this->getConsole().abortEvaluation("bitfield entry size must be an integer value");
                 return static_cast<s128>(value);
             }, valueNode->getValue());
             this->m_currOffset = pointerOffset;
@@ -905,6 +1100,7 @@ namespace hex::lang {
         this->m_globalMembers.clear();
         this->m_types.clear();
         this->m_endianStack.clear();
+        this->m_definedFunctions.clear();
         this->m_currOffset = 0;
 
         try {
@@ -941,6 +1137,8 @@ namespace hex::lang {
                 } else if (auto functionCallNode = dynamic_cast<ASTNodeFunctionCall*>(node); functionCallNode != nullptr) {
                     auto result = this->evaluateFunctionCall(functionCallNode);
                     delete result;
+                } else if (auto functionDefNode = dynamic_cast<ASTNodeFunctionDefinition*>(node); functionDefNode != nullptr) {
+                    this->evaluateFunctionDefinition(functionDefNode);
                 }
 
                 if (pattern != nullptr)

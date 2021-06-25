@@ -10,6 +10,8 @@
 #include <hex/views/view.hpp>
 
 #include <cstring>
+#include <codecvt>
+#include <locale>
 #include <random>
 #include <string>
 
@@ -90,6 +92,7 @@ namespace hex::lang {
         }
 
         virtual std::map<u64, u32> getHighlightedAddresses() {
+            if (this->isHidden()) return { };
             if (this->m_highlightedAddresses.empty()) {
                 for (u64 i = 0; i < this->getSize(); i++)
                     this->m_highlightedAddresses.insert({ this->getOffset() + i, this->getColor() });
@@ -152,7 +155,29 @@ namespace hex::lang {
             return false;
         }
 
+        void draw(prv::Provider *provider) {
+            if (isHidden()) return;
+
+            this->createEntry(provider);
+        }
+
         static void resetPalette() { SharedData::patternPaletteOffset = 0; }
+
+        void setHidden(bool hidden) {
+            this->m_hidden = hidden;
+        }
+
+        [[nodiscard]] bool isHidden() const {
+            return this->m_hidden;
+        }
+
+        void setLocal(bool local) {
+            this->m_local = local;
+        }
+
+        [[nodiscard]] bool isLocal() const {
+            return this->m_local;
+        }
 
     protected:
         void createDefaultEntry(std::string_view value) const {
@@ -188,6 +213,7 @@ namespace hex::lang {
     protected:
         std::endian m_endian = std::endian::native;
         std::map<u64, u32> m_highlightedAddresses;
+        bool m_hidden = false;
 
     private:
         u64 m_offset;
@@ -199,6 +225,7 @@ namespace hex::lang {
         std::string m_typeName;
 
         PatternData *m_parent;
+        bool m_local = false;
     };
 
     class PatternDataPadding : public PatternData {
@@ -478,6 +505,27 @@ namespace hex::lang {
         }
     };
 
+    class PatternDataCharacter16 : public PatternData {
+    public:
+        explicit PatternDataCharacter16(u64 offset, u32 color = 0)
+                : PatternData(offset, 2, color) { }
+
+        PatternData* clone() override {
+            return new PatternDataCharacter16(*this);
+        }
+
+        void createEntry(prv::Provider* &provider) override {
+            char16_t character;
+            provider->read(this->getOffset(), &character, 2);
+
+            this->createDefaultEntry(hex::format("'{0}'", std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{}.to_bytes(character)));
+        }
+
+        [[nodiscard]] std::string getFormattedName() const override {
+            return "char16";
+        }
+    };
+
     class PatternDataString : public PatternData {
     public:
         PatternDataString(u64 offset, size_t size, u32 color = 0)
@@ -497,6 +545,30 @@ namespace hex::lang {
 
         [[nodiscard]] std::string getFormattedName() const override {
            return "String";
+        }
+    };
+
+    class PatternDataString16 : public PatternData {
+    public:
+        PatternDataString16(u64 offset, size_t size, u32 color = 0)
+                : PatternData(offset, size, color) { }
+
+        PatternData* clone() override {
+            return new PatternDataString16(*this);
+        }
+
+        void createEntry(prv::Provider* &provider) override {
+            std::u16string buffer(this->getSize() + 1, 0x00);
+            provider->read(this->getOffset(), buffer.data(), this->getSize());
+            buffer[this->getSize()] = '\0';
+
+            auto utf8String = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{}.to_bytes(buffer);
+
+            this->createDefaultEntry(hex::format("\"{0}\"", utf8String)) ;
+        }
+
+        [[nodiscard]] std::string getFormattedName() const override {
+            return "String16";
         }
     };
 
@@ -552,7 +624,7 @@ namespace hex::lang {
 
             if (open) {
                 for (auto &member : this->m_entries)
-                    member->createEntry(provider);
+                    member->draw(provider);
 
                 ImGui::TreePop();
             }
@@ -634,7 +706,7 @@ namespace hex::lang {
 
             if (open) {
                 for (auto &member : this->m_sortedMembers)
-                    member->createEntry(provider);
+                    member->draw(provider);
 
                 ImGui::TreePop();
             }
@@ -735,7 +807,7 @@ namespace hex::lang {
 
             if (open) {
                 for (auto &member : this->m_sortedMembers)
-                    member->createEntry(provider);
+                    member->draw(provider);
 
                 ImGui::TreePop();
             }
@@ -823,7 +895,7 @@ namespace hex::lang {
                     }
 
                     return false;
-                }, entryValueLiteral.second);
+                }, entryValueLiteral);
                 if (matches)
                     break;
             }

@@ -45,7 +45,11 @@ namespace hex::init {
                     this->m_currTaskName = name;
                 }
 
-                status = task() && status;
+                try {
+                    status = task() && status;
+                } catch (...) {
+                    status = false;
+                }
 
                 {
                     std::lock_guard guard(this->m_progressMutex);
@@ -101,7 +105,8 @@ namespace hex::init {
                     drawList->AddText(ImVec2(15, 140), ImColor(0xFF, 0xFF, 0xFF, 0xFF), hex::format("{0}", IMHEX_VERSION).c_str());
                 #endif
                 drawList->AddRectFilled(ImVec2(0, splashHeight - 5), ImVec2(splashWidth * this->m_progress, splashHeight), 0xFFFFFFFF);
-                drawList->AddText(ImVec2(15, splashHeight - 22), ImColor(0xFF, 0xFF, 0xFF, 0xFF), this->m_currTaskName.data());
+                drawList->AddText(ImVec2(15, splashHeight - 25), ImColor(0xFF, 0xFF, 0xFF, 0xFF),
+                                  hex::format("[{}] {}", "|/-\\"[ImU32(ImGui::GetTime() * 15) % 4], this->m_currTaskName).c_str());
             }
 
             ImGui::Render();
